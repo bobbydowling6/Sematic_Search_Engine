@@ -11,18 +11,17 @@ Make sure you've indexed documents first:
 """
 
 import streamlit as st
-import chromadb
 import os
-from search import search, get_collection_stats
-from ingest import DEFAULT_CHUNK_SIZE, DEFAULT_OVERLAP
+import sys
+from pathlib import Path
+
+STORAGE_DIR = Path(__file__).resolve().parent.parent / "storage"
+DOCS_DIR = STORAGE_DIR / "docs"
+sys.path.insert(0, str(STORAGE_DIR))
+
+from search import get_collection, get_collection_stats, search
 
 st.set_page_config(page_title="Semantic Search", page_icon="🔍", layout="wide")
-
-# --- ChromaDB Setup ---
-@st.cache_resource  # Cache the client so it persists across re-runs
-def get_collection():
-    client = chromadb.PersistentClient(path="./search_db")
-    return client.get_or_create_collection(name="course_docs")
 
 collection = get_collection()
 
@@ -54,7 +53,7 @@ with st.sidebar:
     st.title("📁 Document Manager")
 
     if st.button("🔄 Re-index Documents"):
-        chunks = load_and_chunk("docs")
+        chunks = load_and_chunk(DOCS_DIR)
         if chunks:
             collection.upsert(
                 documents=[c["text"] for c in chunks],
@@ -65,10 +64,17 @@ with st.sidebar:
         else:
             st.warning("No .txt or .md files found in docs/ folder")
 
-    st.metric("Documents in DB", collection.count())
+    collection_stats = get_collection_stats()
+    st.metric("Indexed chunks", collection_stats["total_chunks"])
+    st.metric("Source files", collection_stats["unique_sources"])
 
     st.divider()
     n_results = st.slider("Results to show", 1, 10, 5)
+    selected_sources = st.multiselect(
+        "Filter by source file",
+        options=collection_stats["source_names"],
+    )
+    distance_threshold = st.slider("Maximum distance", 0.0, 2.0, 1.0, 0.05)
 
 # --- Main Search Interface ---
 st.title("🔍 Semantic Search")
@@ -76,35 +82,37 @@ st.write("Search your course documents by meaning, not just keywords.")
 
 query = st.text_input("Enter your search query", placeholder="How does authentication work?")
 
-if query and collection.count() > 0:
-    results = collection.query(
-        query_texts=[query],
-        n_results=min(n_results, collection.count())
+if query.strip():
+    results = search(
+        query,
+        n_results=n_results,
+        sources=selected_sources or None,
+        distance_threshold=distance_threshold,
     )
 
-    st.subheader(f"Top {len(results['documents'][0])} Results")
+    if results:
+        st.subheader(f"Top {len(results)} Results")
 
-    for i in range(len(results['documents'][0])):
-        doc = results['documents'][0][i]
-        metadata = results['metadatas'][0][i]
-        distance = results['distances'][0][i]
+        for result in results:
+            distance = result["distance"]
 
-        # Color-code by relevance
-        if distance < 0.5:
-            relevance = "🟢 High"
-        elif distance < 1.0:
-            relevance = "🟡 Medium"
-        else:
-            relevance = "🔴 Low"
+            if distance < 0.5:
+                relevance = "🟢 High"
+            elif distance < 1.0:
+                relevance = "🟡 Medium"
+            else:
+                relevance = "🔴 Low"
 
-        with st.container():
-            col_meta, col_score = st.columns([3, 1])
-            with col_meta:
-                st.write(f"**{metadata['source']}** — chunk {metadata['chunk_index']}")
-            with col_score:
-                st.write(f"{relevance} (dist: {distance:.3f})")
-            st.write(doc)
-            st.divider()
+            with st.container():
+                col_meta, col_score = st.columns([3, 1])
+                with col_meta:
+                    st.write(f"**{result['source']}** — chunk {result['chunk_index']}")
+                with col_score:
+                    st.write(f"{relevance} (dist: {distance:.3f})")
+                st.write(result["text"])
+                st.divider()
+    else:
+        st.info("No results matched the selected distance threshold and source filters.")
 
-elif collection.count() == 0:
+elif collection_stats["total_chunks"] == 0:
     st.info("👈 Click 'Re-index Documents' in the sidebar to load your documents first.")

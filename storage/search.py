@@ -9,17 +9,17 @@ Import this module into app.py:
 
 from pathlib import Path
 import chromadb
-from sentence_transformers import SentenceTransformer
 
 # ── Configuration (must match ingest.py) ─────────────────────────────────────
-CHROMA_PATH = Path("../storage/chroma_data")
+CHROMA_PATH = Path(__file__).resolve().parent / "chroma_data"
 COLLECTION_NAME = "semantic_search"
 MODEL_NAME = "all-MiniLM-L6-v2"
 
 
 def get_collection():
     """Return the persistent ChromaDB collection."""
-    pass
+    client = chromadb.PersistentClient(path=str(CHROMA_PATH))
+    return client.get_or_create_collection(name=COLLECTION_NAME)
 
 
 def search(
@@ -49,7 +49,45 @@ def search(
             }
         Returns [] for empty queries or if the collection has no documents.
     """
-    return []
+    if not query or not query.strip():
+        return []
+    if n_results <= 0:
+        return []
+    if sources is not None and not sources:
+        return []
+
+    collection = get_collection()
+    total_chunks = collection.count()
+    if total_chunks == 0:
+        return []
+
+    query_kwargs = {
+        "query_texts": [query],
+        "n_results": min(n_results, total_chunks),
+    }
+    if sources is not None:
+        query_kwargs["where"] = {"source": {"$in": sources}}
+
+    raw_results = collection.query(**query_kwargs)
+    documents = raw_results.get("documents", [[]])[0] or []
+    metadatas = raw_results.get("metadatas", [[]])[0] or []
+    distances = raw_results.get("distances", [[]])[0] or []
+
+    results = []
+    for text, metadata, distance in zip(documents, metadatas, distances):
+        if distance_threshold is not None and distance > distance_threshold:
+            continue
+
+        metadata = metadata or {}
+        results.append({
+            "text": text,
+            "source": metadata.get("source", ""),
+            "chunk_index": int(metadata.get("chunk_index", 0)),
+            "distance": float(distance),
+            "score": 1 - float(distance),
+        })
+
+    return results
 
 
 def get_collection_stats() -> dict:
@@ -63,4 +101,13 @@ def get_collection_stats() -> dict:
             "source_names":   list[str],
         }
     """
-    return {"total_chunks": 0, "unique_sources": 0, "source_names": []}
+    collection = get_collection()
+    metadatas = collection.get(include=["metadatas"]).get("metadatas", []) or []
+    source_names = sorted({metadata.get("source", "") for metadata in metadatas if metadata})
+    source_names = [source for source in source_names if source]
+
+    return {
+        "total_chunks": collection.count(),
+        "unique_sources": len(source_names),
+        "source_names": source_names,
+    }
