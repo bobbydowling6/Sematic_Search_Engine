@@ -12,9 +12,9 @@ import chromadb
 from sentence_transformers import SentenceTransformer
 
 # ── Configuration (must match ingest.py) ─────────────────────────────────────
-CHROMA_PATH     = Path("chroma_data")
+CHROMA_PATH = Path("../storage/chroma_data")
 COLLECTION_NAME = "semantic_search"
-MODEL_NAME      = "all-MiniLM-L6-v2"
+MODEL_NAME = "all-MiniLM-L6-v2"
 
 
 def get_collection():
