@@ -19,50 +19,18 @@ STORAGE_DIR = Path(__file__).resolve().parent.parent / "storage"
 DOCS_DIR = STORAGE_DIR / "docs"
 sys.path.insert(0, str(STORAGE_DIR))
 
-from search import get_collection, get_collection_stats, search
+from ingest import ingest as ingest_documents
+from search import get_collection_stats, search
 
 st.set_page_config(page_title="Semantic Search", page_icon="🔍", layout="wide")
-
-collection = get_collection()
-
-# --- Document Loading & Chunking ---
-def load_and_chunk(directory, chunk_size=400, overlap=50):
-    """Load text files and split into chunks."""
-    chunks = []
-    for filename in sorted(os.listdir(directory)):
-        if not filename.endswith(('.txt', '.md')):
-            continue
-        filepath = os.path.join(directory, filename)
-        with open(filepath, 'r', encoding='utf-8') as f:
-            content = f.read()
-
-        # Split by paragraphs (double newline)
-        paragraphs = [p.strip() for p in content.split('\\n\\n') if p.strip()]
-
-        for i, para in enumerate(paragraphs):
-            chunks.append({
-                "text": para,
-                "source": filename,
-                "chunk_id": f"{filename}_{i}",
-                "chunk_index": i,
-            })
-    return chunks
 
 # --- Sidebar: Ingestion Controls ---
 with st.sidebar:
     st.title("📁 Document Manager")
 
     if st.button("🔄 Re-index Documents"):
-        chunks = load_and_chunk(DOCS_DIR)
-        if chunks:
-            collection.upsert(
-                documents=[c["text"] for c in chunks],
-                metadatas=[{"source": c["source"], "chunk_index": str(c["chunk_index"])} for c in chunks],
-                ids=[c["chunk_id"] for c in chunks],
-            )
-            st.success(f"Indexed {len(chunks)} chunks from {len(set(c['source'] for c in chunks))} files")
-        else:
-            st.warning("No .txt or .md files found in docs/ folder")
+        chunk_count = ingest_documents(500)
+        st.success(f"Indexed {chunk_count} chunks using the 500-character index")
 
     collection_stats = get_collection_stats()
     st.metric("Indexed chunks", collection_stats["total_chunks"])

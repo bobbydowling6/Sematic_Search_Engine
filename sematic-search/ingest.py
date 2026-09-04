@@ -1,157 +1,77 @@
-"""
-Module 7 Project — Semantic Search Engine
-==========================================
-ingest.py — document loading, chunking, and ChromaDB storage
+"""Load the course documents into one or more chunk-size indexes."""
 
-Run with:
-    python ingest.py
-    python ingest.py --chunk-size 200 --overlap 50
-"""
-from multiprocessing import util
-import os
 import argparse
 from pathlib import Path
-import chromadb
-from sentence_transformers import SentenceTransformer
-import re
 
-# ── Configuration ─────────────────────────────────────────────────────────────
-DOCS_DIR = Path("../storage/docs")
-CHROMA_PATH = Path("../storage/chroma_data")
-COLLECTION_NAME = "semantic_search"
-MODEL_NAME = "all-MiniLM-L6-v2"
-DEFAULT_CHUNK_SIZES = 150, 300, 600
+import chromadb
+
+
+DOCS_DIR = Path(__file__).resolve().parent.parent / "storage" / "docs"
+CHROMA_PATH = Path(__file__).resolve().parent.parent / "storage" / "chroma_data"
+COLLECTION_PREFIX = "semantic_search"
+DEFAULT_CHUNK_SIZES = (200, 500)
 DEFAULT_OVERLAP = 50
 
-model = SentenceTransformer('all-MiniLM-L6-v2')
 
-def fixed_small_chunks(text, size=150, overlap=50):
-    chunks = []
-    start = 0
-    while start < len(text):
-        end = min(start + size, len(text))
-        chunks.append(text[start:end].strip())
-        start += size - overlap  # advance by a fixed step so this always terminates
-    return [c for c in chunks if c]
+def fixed_chunks(text: str, size: int, overlap: int) -> list[str]:
+    """Split text into overlapping fixed-size chunks."""
+    if size <= 0 or overlap < 0 or overlap >= size:
+        raise ValueError("chunk size must be positive and overlap must be smaller than size")
 
-def fixed_medium_chunks(text, size=300, overlap=50):
-    chunks = []
-    start = 0
-    while start < len(text):
-        end = min(start + size, len(text))
-        chunks.append(text[start:end].strip())
-        start += size - overlap  # advance by a fixed step so this always terminates
-    return [c for c in chunks if c]
-
-def fixed_large_chunks(text, size=600, overlap=50):
-    chunks = []
-    start = 0
-    while start < len(text):
-        end = min(start + size, len(text))
-        chunks.append(text[start:end].strip())
-        start += size - overlap  # advance by a fixed step so this always terminates
-    return [c for c in chunks if c]
-
-strategies = {
-    "fixed_small": fixed_small_chunks,
-    "fixed_medium": fixed_medium_chunks,
-    "fixed_large": fixed_large_chunks,
-}
-
-for name, chunks in strategies.items():
-    sizes = [len(c) for c in chunks]
-    print(f"{name}: {len(chunks)} chunks, avg {sum(sizes)//len(sizes)} chars")
-
-query_1 = "How does FastAPI validate data?"
-print(f"Query: '{query_1}'")
-query_2 = "What is the difference between FastAPI and Flask?"
-print(f"Query: '{query_2}'")
-query_3 = "How do I deploy a FastAPI app?"
-print(f"Query: '{query_3}'")
-query_4 = "What are the benefits of using FastAPI?"
-print(f"Query: '{query_4}'")
-query_5 = "How can I test a FastAPI application?"
-print(f"Query: '{query_5}'")
-
-for name, chunks in strategies.items():
-    # Embed chunks
-    chunk_embeddings = model.encode(chunks)
-    query_embedding = model.encode([query_1, query_2, query_3, query_4, query_5])
-
-    # Find best match
-    scores = util.cos_sim(query_embedding, chunk_embeddings)[0]
-    best_idx = scores.argmax().item()
-    best_score = scores[best_idx].item()
-
-    print(f"--- {name} ---")
-    print(f"Best score: {best_score:.4f}")
-    print(f"Best chunk ({len(chunks[best_idx])} chars):")
-    print(f"  '{chunks[best_idx][:120]}...'")
+    step = size - overlap
+    return [
+        text[start:min(start + size, len(text))].strip()
+        for start in range(0, len(text), step)
+        if text[start:min(start + size, len(text))].strip()
+    ]
 
 
-def load_documents(docs_dir: Path) -> list[dict]:
+def load_documents(docs_dir: Path) -> list[dict[str, str]]:
     documents = []
-    for filename in os.listdir(docs_dir):
-        if filename.endswith(('.txt', '.md')):
-            filepath = os.path.join(docs_dir, filename)
-            with open(filepath, 'r', encoding='utf-8') as f:
-                content = f.read()
-            documents.append({
-                "content": content,
-                "source": filename,  # Track which file each chunk came from
-            })
+    for path in sorted(docs_dir.iterdir()):
+        if path.suffix in {".txt", ".md"}:
+            documents.append({"content": path.read_text(encoding="utf-8"), "source": path.name})
     return documents
 
-def ingest_documents(directory, collection):
-    """Load, chunk, and store documents in ChromaDB."""
-    documents = load_documents(directory)
-    all_chunks = []
-    all_metadatas = []
-    all_ids = []
 
-    for doc in documents:
-        chunks = paragraph_chunks(doc["content"])  # Your chunking function
-        for i, chunk in enumerate(chunks):
-            all_chunks.append(chunk)
-            all_metadatas.append({"source": doc["source"], "chunk_index": str(i)})
-            all_ids.append(f"{doc['source']}_{i}")
-
-    collection.upsert(
-        documents=all_chunks,
-        metadatas=all_metadatas,
-        ids=all_ids
-    )
-    return len(all_chunks)
+def collection_name(chunk_size: int) -> str:
+    return f"{COLLECTION_PREFIX}_{chunk_size}"
 
 
-    """
-    Read all .txt and .md files from docs_dir.
+def ingest(chunk_size: int, overlap: int = DEFAULT_OVERLAP) -> int:
+    """Rebuild and populate the persistent index for one chunk size."""
+    client = chromadb.PersistentClient(path=str(CHROMA_PATH))
+    name = collection_name(chunk_size)
+    try:
+        client.delete_collection(name)
+    except Exception:
+        pass
+    collection = client.create_collection(name=name)
 
-    Returns:
-        List of dicts: {"filename": str, "text": str}
-    """
-    pass
+    chunks = []
+    metadatas = []
+    ids = []
+    documents = load_documents(DOCS_DIR)
+    for document in documents:
+        for index, chunk in enumerate(fixed_chunks(document["content"], chunk_size, overlap)):
+            chunks.append(chunk)
+            metadatas.append({
+                "source": document["source"],
+                "chunk_index": str(index),
+                "chunk_size": str(chunk_size),
+            })
+            ids.append(f"{document['source']}_{chunk_size}_{index}")
 
-
-def get_collection(chroma_path: Path, collection_name: str):
-    """Create (or retrieve) a persistent ChromaDB collection."""
-    pass
-
-
-def ingest(chunk_size: int = DEFAULT_CHUNK_SIZE, overlap: int = DEFAULT_OVERLAP):
-    """
-    Full ingestion pipeline: load → chunk → embed → upsert.
-
-    Each chunk is stored with metadata: source filename, chunk index,
-    and the chunk size used — so experiments with different sizes can
-    be compared without ambiguity.
-    """
-    pass
+    collection.upsert(documents=chunks, metadatas=metadatas, ids=ids)
+    print(f"{name}: indexed {len(chunks)} chunks from {len(documents)} documents")
+    return len(chunks)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Index docs/ into ChromaDB")
-    parser.add_argument("--chunk-size", type=int, default=DEFAULT_CHUNK_SIZE)
-    parser.add_argument("--overlap",    type=int, default=DEFAULT_OVERLAP)
+    parser.add_argument("--chunk-size", type=int, choices=range(1, 2001))
+    parser.add_argument("--overlap", type=int, default=DEFAULT_OVERLAP)
     args = parser.parse_args()
-    ingest(chunk_size=args.chunk_size, overlap=args.overlap)
+    sizes = (args.chunk_size,) if args.chunk_size else DEFAULT_CHUNK_SIZES
+    for size in sizes:
+        ingest(size, args.overlap)
