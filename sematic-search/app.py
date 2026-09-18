@@ -1,15 +1,3 @@
-"""
-Module 7 Project — Semantic Search Engine
-==========================================
-app.py — Streamlit search interface
-
-Run with:
-    streamlit run app.py
-
-Make sure you've indexed documents first:
-    python ingest.py
-"""
-
 import streamlit as st
 import os
 import sys
@@ -48,7 +36,7 @@ with st.sidebar:
 st.title("🔍 Semantic Search")
 st.write("Search your course documents by meaning, not just keywords.")
 
-query = st.text_input("Enter your search query", placeholder="How does authentication work?")
+query = st.text_input("Enter your search query", placeholder="What is a SQL Database?")
 
 if query.strip():
     results = search(
