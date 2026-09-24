@@ -29,15 +29,7 @@ EVALUATION_QUERIES = [
 
 
 def get_chroma_client(db_path: Path) -> chromadb.PersistentClient:
-    """
-    Initializes and returns a persistent ChromaDB client.
-
-    Args:
-        db_path (Path): File system path to persistent ChromaDB storage.
-
-    Returns:
-        chromadb.PersistentClient: Configured ChromaDB client instance.
-    """
+    """Initializes and returns a persistent ChromaDB client."""
     return chromadb.PersistentClient(path=str(db_path))
 
 
@@ -46,26 +38,14 @@ def evaluate_query_on_collection(
     collection_name: str,
     query: str,
     n_results: int = 3,
-    threshold: float = DISTANCE_THRESHOLD
+    threshold: float = DISTANCE_THRESHOLD,
 ) -> dict:
-    """
-    Queries a specific ChromaDB collection for top N matches and determines relevance.
-
-    Args:
-        client (chromadb.PersistentClient): Active ChromaDB client instance.
-        collection_name (str): Name of the collection to search ('semantic_search_200' or 'semantic_search_500').
-        query (str): The search text query.
-        n_results (int, optional): Number of top results to retrieve. Defaults to 3.
-        threshold (float, optional): Maximum cosine distance for a result to be considered relevant. Defaults to 0.80.
-
-    Returns:
-        dict: Evaluation metrics for the query including individual result ranks, distances, text snippets, and Precision@3.
-    """
+    """Queries a specific ChromaDB collection for top N matches and determines relevance."""
     try:
         collection = client.get_collection(name=collection_name)
         results = collection.query(query_texts=[query], n_results=n_results)
     except Exception as e:
-        print(f"Error querying collection '{collection_name}': {e}")
+        print(f"Error accessing collection '{collection_name}': {e}")
         return {"ranks": [], "precision_at_3": 0.0}
 
     ranks = []
@@ -76,35 +56,32 @@ def evaluate_query_on_collection(
             distance = results["distances"][0][i] if "distances" in results else 1.0
             doc_text = results["documents"][0][i]
             is_relevant = distance < threshold
-            
+
             if is_relevant:
                 relevant_count += 1
+
+            # Format snippet cleanly
+            clean_text = doc_text.replace("\n", " ").strip()
+            snippet = clean_text[:80] + ("..." if len(clean_text) > 80 else "")
 
             ranks.append({
                 "rank": i + 1,
                 "distance": distance,
                 "relevant": is_relevant,
-                "snippet": doc_text[:80].replace("\n", " ") + "..."
+                "snippet": snippet,
             })
 
-    precision_at_3 = relevant_count / max(1, len(ranks))
+    # Fixed denominator: Precision@K should divide by requested K (n_results)
+    precision_at_k = relevant_count / float(n_results)
 
     return {
         "ranks": ranks,
-        "precision_at_3": precision_at_3
+        "precision_at_3": precision_at_k,
     }
 
 
 def run_experiment(queries: list[str]) -> list[dict]:
-    """
-    Runs the full chunk-size evaluation experiment across all queries for 200 and 500 character collections.
-
-    Args:
-        queries (list[str]): List of query strings to evaluate.
-
-    Returns:
-        list[dict]: Array of structured evaluation outputs comparing both chunk sizes for each query.
-    """
+    """Runs the full chunk-size evaluation experiment across all queries for 200 and 500 character collections."""
     client = get_chroma_client(CHROMA_PATH)
     experiment_results = []
 
@@ -115,37 +92,45 @@ def run_experiment(queries: list[str]) -> list[dict]:
         experiment_results.append({
             "query": query,
             "200_char": eval_200,
-            "500_char": eval_500
+            "500_char": eval_500,
         })
 
     return experiment_results
 
 
 def print_formatted_results(results: list[dict]) -> None:
-    """
-    Prints comparative detailed logs and outputs a markdown table for README documentation.
-
-    Args:
-        results (list[dict]): Processed evaluation results from run_experiment.
-
-    Returns:
-        None
-    """
+    """Prints comparative detailed logs and outputs a markdown table for README documentation."""
     print("=" * 80)
     print("CHUNK-SIZE EXPERIMENT EVALUATION RESULTS (Top 3 Scoring)")
     print(f"Relevance Threshold: Cosine Distance < {DISTANCE_THRESHOLD}")
     print("=" * 80 + "\n")
+
+    p3_200_scores = []
+    p3_500_scores = []
 
     # Detailed Console Output
     for item in results:
         print(f"QUERY: '{item['query']}'")
         for chunk_key in ["200_char", "500_char"]:
             data = item[chunk_key]
+            if chunk_key == "200_char":
+                p3_200_scores.append(data["precision_at_3"])
+            else:
+                p3_500_scores.append(data["precision_at_3"])
+
             print(f"  [{chunk_key.upper()}] (Precision@3: {data['precision_at_3']:.2f})")
             for r in data["ranks"]:
                 rel_str = "RELEVANT" if r["relevant"] else "IRRELEVANT"
                 print(f"    Rank {r['rank']}: Score = {r['distance']:.4f} | [{rel_str}] | Snippet: {r['snippet']}")
         print("-" * 80)
+
+    # Calculate Aggregate Mean Precision@3
+    mean_p3_200 = sum(p3_200_scores) / max(1, len(p3_200_scores))
+    mean_p3_500 = sum(p3_500_scores) / max(1, len(p3_500_scores))
+
+    print(f"\nAGGREGATE SUMMARY:")
+    print(f"  200-char Collection Mean Precision@3: {mean_p3_200:.2f}")
+    print(f"  500-char Collection Mean Precision@3: {mean_p3_500:.2f}")
 
     # Markdown Table Generation for README.md
     print("\n\n### README Markdown Table Output:\n")
@@ -157,7 +142,7 @@ def print_formatted_results(results: list[dict]) -> None:
         for size_label, chunk_key in [("200-char", "200_char"), ("500-char", "500_char")]:
             ranks = item[chunk_key]["ranks"]
             rank_cols = []
-            
+
             for i in range(3):
                 if i < len(ranks):
                     r = ranks[i]
